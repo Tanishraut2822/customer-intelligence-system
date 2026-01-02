@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import pickle
+from sklearn.metrics.pairwise import cosine_similarity
 
 # =====================================
 # PAGE CONFIG
@@ -12,44 +13,57 @@ st.set_page_config(
 
 st.title("🛒 Customer Intelligence System")
 st.write(
-    "Predict customer segment, future purchase behavior, "
-    "and personalized product recommendations."
+    "End-to-end customer segmentation, future purchase prediction, "
+    "and product recommendation system."
 )
 
 # =====================================
-# LOAD MODELS (PKL FILES)
+# LOAD TRAINED MODELS (SMALL PKL FILES)
 # =====================================
-kmeans = pickle.load(open('kmeans_model.pkl', 'rb'))
-scaler = pickle.load(open('scaler.pkl', 'rb'))
-future_pipeline = pickle.load(open('future_pipeline.pkl', 'rb'))
-segment_map = pickle.load(open('segment_map.pkl', 'rb'))
-customer_product = pickle.load(open('customer_product.pkl', 'rb'))
-customer_similarity_df = pickle.load(open('customer_similarity.pkl', 'rb'))
+kmeans = pickle.load(open("kmeans_model.pkl", "rb"))
+scaler = pickle.load(open("scaler.pkl", "rb"))
+future_pipeline = pickle.load(open("future_pipeline.pkl", "rb"))
+segment_map = pickle.load(open("segment_map.pkl", "rb"))
 
 # =====================================
-# LOAD DATABASE (CSV)
+# LOAD TRANSACTION DATA
 # =====================================
-df = pd.read_csv('data.csv')
+@st.cache_data
+def load_data():
+    df = pd.read_csv("data.csv")
+    df["CustomerID"] = df["CustomerID"].astype(str)
+    df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"], errors="coerce")
+    df.dropna(subset=["InvoiceDate"], inplace=True)
+    return df
 
-# Fix datatypes
-df['CustomerID'] = df['CustomerID'].astype(str)
-df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'], errors='coerce')
-df.dropna(subset=['InvoiceDate'], inplace=True)
+df = load_data()
 
 # =====================================
-# CREATE RFM TABLE FROM DATABASE
+# BUILD RECOMMENDER SYSTEM (CACHED)
 # =====================================
-df['TotalAmount'] = df['Quantity'] * df['UnitPrice']
+@st.cache_resource
+def build_recommender(df):
 
-snapshot_date = df['InvoiceDate'].max() + pd.Timedelta(days=1)
+    customer_product = df.pivot_table(
+        index="CustomerID",
+        columns="Description",
+        values="Quantity",
+        aggfunc="sum",
+        fill_value=0
+    )
 
-rfm_db = df.groupby('CustomerID').agg({
-    'InvoiceDate': lambda x: (snapshot_date - x.max()).days,
-    'InvoiceNo': 'nunique',
-    'TotalAmount': 'sum'
-}).reset_index()
+    similarity = cosine_similarity(customer_product)
 
-rfm_db.columns = ['CustomerID', 'Recency', 'Frequency', 'Monetary']
+    customer_similarity_df = pd.DataFrame(
+        similarity,
+        index=customer_product.index,
+        columns=customer_product.index
+    )
+
+    return customer_product, customer_similarity_df
+
+
+customer_product, customer_similarity_df = build_recommender(df)
 
 # =====================================
 # RECOMMENDATION FUNCTION
@@ -70,7 +84,23 @@ def recommend_products(customer_id, top_n=4):
     purchased = customer_product.loc[customer_id]
 
     product_scores = product_scores[purchased == 0]
+
     return product_scores.sort_values(ascending=False).head(top_n).index.tolist()
+
+# =====================================
+# CREATE RFM TABLE FROM DATA
+# =====================================
+df["TotalAmount"] = df["Quantity"] * df["UnitPrice"]
+
+snapshot_date = df["InvoiceDate"].max() + pd.Timedelta(days=1)
+
+rfm = df.groupby("CustomerID").agg({
+    "InvoiceDate": lambda x: (snapshot_date - x.max()).days,
+    "InvoiceNo": "nunique",
+    "TotalAmount": "sum"
+}).reset_index()
+
+rfm.columns = ["CustomerID", "Recency", "Frequency", "Monetary"]
 
 # =====================================
 # SIDEBAR – CUSTOMER SELECTION
@@ -79,14 +109,14 @@ st.sidebar.header("Select Customer")
 
 customer_id = st.sidebar.selectbox(
     "Choose Customer ID",
-    rfm_db['CustomerID'].unique()
+    rfm["CustomerID"].unique()
 )
 
-selected_customer = rfm_db[
-    rfm_db['CustomerID'] == customer_id
-][['Recency', 'Frequency', 'Monetary']]
+selected_customer = rfm[
+    rfm["CustomerID"] == customer_id
+][["Recency", "Frequency", "Monetary"]]
 
-st.sidebar.write("### RFM Values")
+st.sidebar.subheader("RFM Values")
 st.sidebar.write(selected_customer)
 
 # =====================================
@@ -95,11 +125,12 @@ st.sidebar.write(selected_customer)
 if st.sidebar.button("Predict Customer Insights"):
 
     # -----------------------------
-    # SEGMENT PREDICTION
+    # CUSTOMER SEGMENT PREDICTION
     # -----------------------------
     seg_id = kmeans.predict(
         scaler.transform(selected_customer)
     )[0]
+
     segment_name = segment_map[seg_id]
 
     # -----------------------------
