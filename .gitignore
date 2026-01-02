@@ -1,6 +1,5 @@
 customer_similarity.pkl
 customer_product.pkl
-*.pkl
 venv/
 __pycache__/
 .ipynb_checkpoints/
